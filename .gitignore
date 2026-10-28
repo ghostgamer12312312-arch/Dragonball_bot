@@ -1,0 +1,23 @@
+# Environment variables (DO NOT COMMIT!)
+.env
+
+# SQLite Database (prevents massive file size and corruption issues)
+*.sqlite
+*.db
+
+# Python Virtual Environment
+venv/
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db

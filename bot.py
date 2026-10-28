@@ -1337,3 +1337,446 @@ async def cmd_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =============================================================
 # END OF PART 2
 # =============================================================
+# =============================================================
+# PART 3 — SUMMON / DAILY / RANKUP / TRAVEL / FUSION / CLAN / RAID
+# =============================================================
+
+@require_not_banned
+async def cmd_summon(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Key-based boss battle with PERSISTENT HP."""
+    ensure_player_for_update(update)
+    uid = update.effective_user.id
+    p = db.player(uid)
+    if not p: return
+
+    if not context.args:
+        lines = ["🔱 <b>Summon Gate</b>\n"]
+        for key, info in G.SUMMONS.items():
+            persisted = db.summon_hp(uid, key)
+            hp_text = (f"{persisted:,}/{info['hp']:,} HP remaining" if persisted else "full HP")
+            lines.append(f"<b>{key.capitalize()}</b>\n  Boss: {info['name']}\n  Cost: 1 {info['key'].replace('keys_', '').capitalize()} Key\n  Rewards: 5× normal\n  Status: {hp_text}\n  <code>/summon {key}</code>")
+        lines.append("\n<i>💡 If defeated, boss HP is preserved — eat a Senzu and try again!</i>")
+        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+        return
+
+    kind = context.args[0].lower()
+    data = G.SUMMONS.get(kind)
+    if data is None:
+        await update.message.reply_text("❓ Unknown summon.\nUse: <code>/summon elite</code>, <code>/summon mythical</code>, or <code>/summon legendary</code>", parse_mode=ParseMode.HTML)
+        return
+
+    key_col = data["key"]
+    if p[key_col] <= 0:
+        await update.message.reply_text(f"🔑 <b>No keys!</b>\n\nYou need 1 {key_col.replace('keys_', '').capitalize()} Key.\nBuy with <code>/shop tickets</code> or defeat bosses.", parse_mode=ParseMode.HTML)
+        return
+
+    s = player_stats(uid)
+    if s["current_hp"] <= 1:
+        await update.message.reply_text("⚠️ <b>HP Critical!</b>\n\nYour HP is 1.\nUse <code>/heal Senzu Bean</code> first.", parse_mode=ParseMode.HTML)
+        return
+
+    if not db.spend(uid, key_col, 1):
+        await update.message.reply_text("❌ Failed to consume key.")
+        return
+
+    boss_name = data["name"]
+    boss_max_hp = data["hp"]
+    persisted_hp = db.summon_hp(uid, kind)
+    current_boss_hp = persisted_hp if persisted_hp else boss_max_hp
+
+    result = run_battle(uid, boss_name, current_boss_hp, data["dmg"], enrage=True, is_boss=True, is_summon=True)
+
+    if result["won"]:
+        mult = data["reward_mult"]
+        yens = 20000 * mult; gems = 50 * mult; crystals = 6 * mult; sp = 20 * mult; exp = 500 * mult
+        db.give(uid, yens=yens, gems=gems, crystals=crystals, skill_points=sp, exp=exp)
+        drops = apply_drops(uid, is_boss=True, is_summon=True)
+        
+        if random.random() < 0.6:
+            star = random.choice(G.DRAGON_BALL_STARS); db.add_dragon_ball(uid, star); drops.append(f"🐉 Dragon Ball {star}★")
+        if random.random() < 0.4:
+            skill = random.choice(list(G.SKILLS))
+            if db.add_skill(uid, skill): drops.append(f"🌟 Skill: {skill}")
+
+        db.set_summon_hp(uid, kind, None)
+        ach = combat.CombatAchievements(uid); ach.check_after_battle(True, result["taken"], is_boss=True, is_summon=True); ach.check_dragon_balls()
+        quest = combat.QuestTracker(uid); quest.on_summon_kill(); quest.on_yens_earned(yens)
+
+        s2 = player_stats(uid); bar = _hp_bar(s2["current_hp"], s2["max_hp"])
+        lines = [f"🏆 <b>SUMMON VICTORY: {escape(boss_name)}</b>\n", f"💴 +{yens:,} yens", f"💎 +{gems} gems", f"🔮 +{crystals} crystals", f"🎫 +{sp} SP", f"✨ +{exp} exp"]
+        if drops: lines.append("\n<b>Bonus drops:</b>\n" + "\n".join(f"• {d}" for d in drops))
+        lines.append(f"\n⚔️ {result['dealt']:,} dealt / {result['taken']:,} taken\n❤️ HP: {s2['current_hp']}/{s2['max_hp']}\n   {bar}")
+        lines.append(ach.reward_text())
+        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+    else:
+        boss_hp_left = max(0, current_boss_hp - result["dealt"])
+        if boss_hp_left > 0: db.set_summon_hp(uid, kind, boss_hp_left)
+        await update.message.reply_text(f"❌ <b>Defeated by {escape(boss_name)}!</b>\n\n❤️ HP restored to 1. Use /heal Senzu Bean.\n\n⚔️ {result['dealt']:,} dealt / {result['taken']:,} taken\n\n👹 <b>Boss HP preserved:</b> {boss_hp_left:,}/{boss_max_hp:,}\n<i>Heal up and finish it off!</i>", parse_mode=ParseMode.HTML)
+
+@require_not_banned
+async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_player_for_update(update)
+    uid = update.effective_user.id
+    result = db.claim_daily(uid)
+    if result is None:
+        await update.message.reply_text("📅 <b>Daily already claimed.</b>\n\nCome back tomorrow for your next reward!", parse_mode=ParseMode.HTML)
+        return
+    streak, rewards = result
+    parts = [f"{ {'yens': '💴', 'gems': '💎', 'crystals': '🔮', 'tickets': '🎫', 'skill_points': '🌟'}.get(k, '•') } +{v:,} {k}" for k, v in rewards.items()]
+    await update.message.reply_text(f"📅 <b>Daily Reward Claimed!</b>\n\n🔥 Streak: <b>{streak} day{'s' if streak != 1 else ''}</b>\n\n" + "\n".join(parts), parse_mode=ParseMode.HTML)
+
+@require_not_banned
+async def cmd_weekly(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_player_for_update(update)
+    uid = update.effective_user.id
+    result = db.claim_weekly(uid)
+    if result is None:
+        await update.message.reply_text("📅 <b>Weekly already claimed.</b>\n\nCome back next week!", parse_mode=ParseMode.HTML)
+        return
+    rewards, star = result
+    parts = [f"{ {'yens': '💴', 'gems': '💎', 'crystals': '🔮', 'tickets': '🎫', 'skill_points': '🌟'}.get(k, '•') } +{v:,} {k}" for k, v in rewards.items()]
+    await update.message.reply_text(f"📅 <b>Weekly Reward Claimed!</b>\n\n" + "\n".join(parts) + f"\n\n🐉 Bonus: Dragon Ball {star}★", parse_mode=ParseMode.HTML)
+
+@require_not_banned
+async def cmd_rankup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_player_for_update(update)
+    uid = update.effective_user.id
+    p = db.player(uid)
+    if not p: return
+
+    rank = int(p["rank"] or 1)
+    max_rank = max(G.RANKS.keys())
+    if rank >= max_rank:
+        await update.message.reply_text(f"👑 <b>You are already at the maximum rank!</b>\n\nRank: {max_rank} ({G.RANKS[max_rank]})\nYou've achieved godhood!", parse_mode=ParseMode.HTML)
+        return
+
+    cost = G.RANKUP_CRYSTALS.get(rank)
+    if cost is None:
+        await update.message.reply_text("❌ Rank system not configured for this rank.")
+        return
+
+    if p["crystals"] < cost:
+        await update.message.reply_text(f"🔮 <b>Not enough crystals.</b>\n\nRank {rank} → {rank + 1}\nCost: <b>{cost:,} crystals</b>\nYou have: {p['crystals']:,} crystals\n\n💡 Earn crystals from bosses and /wish.", parse_mode=ParseMode.HTML)
+        return
+
+    if not db.spend(uid, "crystals", cost): return
+
+    new_rank = rank + 1
+    db.set_field(uid, "rank", new_rank)
+    db.give(uid, yens=250*rank, skill_points=30*rank)
+    ach = combat.CombatAchievements(uid); ach.check_after_battle(True, 0)
+    await update.message.reply_text(f"🌟 <b>RANK UP!</b>\n\n<b>{G.RANKS[rank]}</b> → <b>{G.RANKS[new_rank]}</b>\n\n🎁 +{250*rank:,} yens\n🌟 +{30*rank} SP\n⚔️ All stats multiplied by +{int(G.RANK_BONUS * 100)}% permanently!\n\n<i>Total rank bonus: +{int((new_rank - 1) * G.RANK_BONUS * 100)}%</i>" + ach.reward_text(), parse_mode=ParseMode.HTML)
+
+@require_not_banned
+async def cmd_travel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_player_for_update(update)
+    uid = update.effective_user.id
+    p = db.player(uid)
+    if not p: return
+
+    if not context.args:
+        current = p["travel"] or "Earth"; level = db.level_of(p["exp"])
+        lines = [f"🌍 <b>Travel — 6 Planet Realms</b>\n", f"You are on: <b>{escape(current)}</b>\n", f"Level: {level}\n"]
+        for i, name in enumerate(G.PLANET_ORDER, 1):
+            data = G.PLANETS[name]; locked = level < data["level_min"]
+            marker = "📍" if name == current else ("🔒" if locked else "▫️")
+            lines.append(f"{marker} <b>{i}. {name}</b>\n   Lv {data['level_min']}–{data['level_max']} · x{data['multiplier']} rewards\n   <i>{data['desc']}</i>")
+        lines.append("\n💡 <code>/travel &lt;number&gt;</code> to travel")
+        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+        return
+
+    idx = int(context.args[0]) if context.args[0].isdigit() else 0
+    if idx < 1 or idx > len(G.PLANET_ORDER):
+        await update.message.reply_text(f"❌ Planet number must be 1-{len(G.PLANET_ORDER)}.")
+        return
+
+    name = G.PLANET_ORDER[idx - 1]; data = G.PLANETS[name]; level = db.level_of(p["exp"])
+    if level < data["level_min"]:
+        await update.message.reply_text(f"🔒 <b>Level too low for {escape(name)}</b>\n\nRequired: Lv {data['level_min']}\nYour level: {level}\n\n💡 Keep exploring {p['travel'] or 'Earth'} to level up.", parse_mode=ParseMode.HTML)
+        return
+
+    db.set_field(uid, "travel", name)
+    ach = combat.CombatAchievements(uid); ach.check_after_battle(True, 0)
+    await update.message.reply_text(f"🌍 <b>Traveled to {escape(name)}!</b>\n\nReward multiplier: <b>x{data['multiplier']}</b>\n<i>{data['desc']}</i>\n\nUse /explore to start fighting here." + ach.reward_text(), parse_mode=ParseMode.HTML)
+
+@require_not_banned
+async def cmd_fusion(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_player_for_update(update)
+    uid = update.effective_user.id
+    p = db.player(uid)
+    if not p: return
+
+    if not context.args:
+        inv = {row["item"]: row["qty"] for row in db.items(uid)}
+        mats = [f"• {mat} ×{inv.get(mat, 0)}" for mat in G.FUSION_MATERIALS if inv.get(mat, 0) > 0]
+        mat_text = "\n".join(mats) if mats else "<i>None</i>"
+        await update.message.reply_text(f"🧬 <b>Metamoran Fusion Chamber</b>\n\nFusion combines two of your warriors into one stronger hybrid (inherits highest rarity).\n\n<b>Materials:</b>\n{mat_text}\n\n<b>Usage:</b>\n<code>/fusion &lt;char1&gt; + &lt;char2&gt;</code>\nExample: <code>/fusion Goku + Vegeta</code>\n\n<b>Rules:</b>\n• Both characters must be in your roster\n• Cannot fuse same character twice\n• Consumes 1 fusion material", parse_mode=ParseMode.HTML)
+        return
+
+    raw = " ".join(context.args)
+    if "+" in raw:
+        parts = raw.split("+", 1); char1 = parts[0].strip(); char2 = parts[1].strip()
+    else:
+        await update.message.reply_text("❌ Format: <code>/fusion &lt;char1&gt; + &lt;char2&gt;</code>\nExample: <code>/fusion Goku + Vegeta</code>", parse_mode=ParseMode.HTML)
+        return
+
+    if not char1 or not char2 or char1.lower() == char2.lower():
+        await update.message.reply_text("❌ Both different character names required.")
+        return
+    if not db.has_character(uid, char1):
+        await update.message.reply_text(f"❌ You don't own <b>{escape(char1)}</b>.", parse_mode=ParseMode.HTML)
+        return
+    if not db.has_character(uid, char2):
+        await update.message.reply_text(f"❌ You don't own <b>{escape(char2)}</b>.", parse_mode=ParseMode.HTML)
+        return
+
+    inv = {row["item"]: row["qty"] for row in db.items(uid)}
+    material = next((mat for mat in G.FUSION_MATERIALS if inv.get(mat, 0) > 0), None)
+    if not material:
+        await update.message.reply_text("🧬 <b>No fusion material!</b>\n\nBuy Fusion Material with <code>/shop fusion</code>.", parse_mode=ParseMode.HTML)
+        return
+
+    db.remove_item(uid, material, 1)
+    r1, r2 = "common", "common"
+    for cname, crarity in db.characters(uid):
+        if cname == char1: r1 = crarity
+        if cname == char2: r2 = crarity
+    higher_rarity = r1 if G.RARITY_ORDER[r1] >= G.RARITY_ORDER[r2] else r2
+    result_name = f"{char1} & {char2}"
+
+    db.add_character(uid, result_name, higher_rarity)
+    db.set_field(uid, "fusion_count", int(p["fusion_count"] or 0) + 1)
+    ach = combat.CombatAchievements(uid); ach.check_after_battle(True, 0)
+
+    await update.message.reply_text(f"🧬 <b>Fusion Successful!</b>\n\n{escape(char1)} + {escape(char2)}\n→ <b>{escape(result_name)}</b> ({higher_rarity.capitalize()})\n\n<i>Consumed: {material} ×1</i>" + ach.reward_text(), parse_mode=ParseMode.HTML)
+
+@require_not_banned
+async def cmd_clan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_player_for_update(update)
+    uid = update.effective_user.id
+    p = db.player(uid)
+    if not p: return
+
+    if not context.args:
+        await update.message.reply_text(f"🏰 <b>Clan Hall</b>\n\n<code>/clan create &lt;name&gt;</code> — 100 crystals\n<code>/clan join &lt;name&gt;</code> — enlist\n<code>/clan info</code> — clan dossier\n<code>/clan members</code> — roster\n<code>/clan manage</code> — officer commands\n<code>/clan treasure</code> — vault\n<code>/clan raid [boss]</code> — raid boss\n<code>/clan announce &lt;text&gt;</code> — bulletin\n<code>/clan invite @user</code> — recruit\n<code>/clan leave</code> — exit clan\n<code>/clan list</code> — top clans\n<code>/clan perks</code> — research tree", parse_mode=ParseMode.HTML)
+        return
+
+    action = context.args[0].lower(); sub_args = context.args[1:]
+
+    try:
+        if action == "create":
+            clans.create(uid, " ".join(sub_args))
+            ach = combat.CombatAchievements(uid); ach.check_clan(leader=True)
+            await update.message.reply_text(f"🏰 <b>Clan created: {escape(' '.join(sub_args))}</b>\n\nYou are now the leader!\nInvite members with <code>/clan invite @user</code>" + ach.reward_text(), parse_mode=ParseMode.HTML)
+        elif action == "join":
+            clans.join(uid, " ".join(sub_args))
+            await update.message.reply_text(f"🏰 <b>Joined {escape(' '.join(sub_args))}!</b>\n\nUse <code>/clan info</code> to see details.", parse_mode=ParseMode.HTML)
+        elif action == "list":
+            tops = clans.top_clans(10); lines = ["🏆 <b>Top Clans</b>\n"]
+            for i, row in enumerate(tops, 1): lines.append(f"{i}. <b>{escape(row['name'])}</b> — {row['n']} member{'s' if row['n'] != 1 else ''}")
+            await update.message.reply_text("\n".join(lines) if tops else "No clans exist yet.", parse_mode=ParseMode.HTML)
+        else:
+            m = clans.membership(uid)
+            if m is None:
+                await update.message.reply_text("❌ You are not in a clan.\nUse <code>/clan create &lt;name&gt;</code> or <code>/clan join &lt;name&gt;</code>.", parse_mode=ParseMode.HTML)
+                return
+
+            if action == "info":
+                await update.message.reply_text(f"🏰 <b>Clan: {escape(m['name'])}</b>\n\nYour role: <b>{m['role'].capitalize()}</b>\nTreasury:\n  💴 {m['treasure_yens']:,} yens\n  💎 {m['treasure_gems']:,} gems\n  🔮 {m['treasure_crystals']:,} crystals\n\n<b>Announcement:</b>\n<i>{escape(m['announcement']) if m['announcement'] else 'No announcement'}</i>", parse_mode=ParseMode.HTML)
+            elif action == "members":
+                rows = clans.members(m["clan_id"]); lines = [f"🏰 <b>Members of {escape(m['name'])}</b>\n"]
+                for r in rows:
+                    role_icon = {"leader": "👑", "officer": "⚔️", "member": "•"}.get(r["role"], "•")
+                    lines.append(f"{role_icon} {escape(r['first_name'] or 'Unknown')} ({r['role']}) — {r['exp'] or 0:,} exp")
+                await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+            elif action == "leave":
+                res = clans.leave(uid)
+                await update.message.reply_text(f"✅ You left {'and the clan was disbanded' if res == 'disbanded' else 'the clan'}.", parse_mode=ParseMode.HTML)
+            elif action in ["promote", "demote", "transfer", "kick", "invite"]:
+                target_id = resolve_target_id(sub_args, update)
+                if not target_id: await update.message.reply_text("❌ Target user not found."); return
+                if action == "promote": clans.promote(uid, target_id)
+                elif action == "demote": clans.demote(uid, target_id)
+                elif action == "transfer": clans.transfer(uid, target_id)
+                elif action == "kick": clans.remove(uid, target_id)
+                elif action == "invite": clans.add(uid, target_id)
+                await update.message.reply_text(f"✅ Successfully executed /clan {action} on {target_id}.")
+            elif action == "treasure":
+                await update.message.reply_text(f"🏛️ <b>Clan Vault</b>\n\n💴 Yens: {m['treasure_yens']:,}\n💎 Gems: {m['treasure_gems']:,}\n🔮 Crystals: {m['treasure_crystals']:,}\n\n<code>/clan donate &lt;yens|gems|crystals&gt; &lt;amount&gt;</code>", parse_mode=ParseMode.HTML)
+            elif action == "donate":
+                col = resource_name(sub_args[0]); amt = parse_amount(sub_args[1])
+                if col in ("yens", "gems", "crystals") and amt > 0 and db.spend(uid, col, amt):
+                    clans.add_treasure(m["clan_id"], **{col: amt})
+                    await update.message.reply_text(f"✅ Donated {amt:,} {col} to clan vault.")
+            elif action == "announce":
+                if m["role"] in ("leader", "officer"):
+                    clans.set_announcement(m["clan_id"], " ".join(sub_args))
+                    await update.message.reply_text("📢 Announcement posted.")
+            elif action == "raid":
+                if sub_args:
+                    boss = " ".join(sub_args)
+                    if boss in G.CLAN_RAIDS:
+                        data = G.CLAN_RAIDS[boss]; clans.clan_raid_start(m["clan_id"], boss, data["hp"], data["dmg"])
+                        await update.message.reply_text(f"🔱 <b>Clan Raid Started: {boss}</b>\n\n❤️ HP: {data['hp']:,}\n⚔️ Boss damage: {data['dmg']}\n\n<code>/clan raidhit</code> to attack.", parse_mode=ParseMode.HTML)
+                else:
+                    state = clans.clan_raid_state(m["clan_id"])
+                    if state:
+                        pct = int(state["hp"] * 100 / state["max_hp"])
+                        await update.message.reply_text(f"🔱 <b>Clan Raid: {state['boss_name']}</b>\n\n❤️ HP: {state['hp']:,}/{state['max_hp']:,} ({pct}%)\n\n<code>/clan raidhit</code> to attack.", parse_mode=ParseMode.HTML)
+                    else:
+                        await update.message.reply_text("🔱 No active raid. Start one with <code>/clan raid Beerus</code>.", parse_mode=ParseMode.HTML)
+            elif action == "raidhit":
+                state = clans.clan_raid_state(m["clan_id"])
+                if state:
+                    s = player_stats(uid); damage = s["atk"] * 3
+                    result = clans.clan_raid_hit(m["clan_id"], uid, damage)
+                    if result:
+                        new_hp, defeated, dmg_by, boss_name = result
+                        if defeated:
+                            info = G.CLAN_RAIDS.get(boss_name, {})
+                            db.give(uid, yens=info.get("reward_yens", 0), gems=info.get("reward_gems", 0), crystals=info.get("reward_crystals", 0))
+                            await update.message.reply_text(f"🏆 <b>CLAN RAID CLEARED!</b>\n\n<b>{boss_name}</b> defeated!\nRewards granted.", parse_mode=ParseMode.HTML)
+                        else:
+                            await update.message.reply_text(f"⚔️ You hit <b>{boss_name}</b> for <b>{damage:,}</b>!\n\n❤️ Boss HP: {new_hp:,}/{state['max_hp']:,}", parse_mode=ParseMode.HTML)
+    except clans.ClanError as e:
+        await update.message.reply_text(f"❌ {escape(str(e))}", parse_mode=ParseMode.HTML)
+
+@require_not_banned
+async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    rows = db.leaderboard(10)
+    lines = ["🏆 <b>Leaderboard — Top 10</b>\n"]
+    medals = ["🥇", "🥈", "🥉"]
+    for i, row in enumerate(rows, 1):
+        medal = medals[i - 1] if i <= 3 else f"{i}."
+        lines.append(f"{medal} <b>{escape(row['first_name'] or 'Player')}</b>\n   {row['exp']:,} EXP · Rank {row['rank']} ({G.RANKS.get(int(row['rank'] or 1), '?')})\n   {row['total_wins']} wins")
+    await update.message.reply_text("\n".join(lines) if rows else "No players yet.", parse_mode=ParseMode.HTML)
+
+@require_not_banned
+async def cmd_raid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_player_for_update(update)
+    st = db.raid_state()
+    if not st or not st["active"]:
+        await update.message.reply_text("🔱 <b>World Raid</b>\n\n<i>No active raid.</i>\n\nAdmins can start one with <code>/raid_start</code>.", parse_mode=ParseMode.HTML)
+        return
+
+    import json
+    dmg_by = json.loads(st["damage_json"] or "{}")
+    top = sorted(dmg_by.items(), key=lambda x: -x[1])[:3]
+    top_lines = [f"{i}. {escape((db.player(int(u)) or {'first_name': u})['first_name'])} — {d:,} dmg" for i, (u, d) in enumerate(top, 1)]
+    
+    await update.message.reply_text(f"🔱 <b>World Raid: {escape(st['boss_name'] or 'Omega Dragon')}</b>\n\n❤️ HP: {st['hp']:,}/{st['max_hp']:,} ({int(st['hp']*100/st['max_hp'])}%)\n⚔️ Total damage: {sum(dmg_by.values()):,}\n\n<b>Top damage:</b>\n" + "\n".join(top_lines) + "\n\n<code>/raid_attack</code> to hit the boss (0 cooldown!).", parse_mode=ParseMode.HTML)
+
+@require_owner
+async def cmd_raid_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db.raid_start(boss_name=" ".join(context.args) if context.args else G.RAID["name"])
+    await update.message.reply_text(f"🔱 <b>World Raid Started!</b>\n\nAll players can attack with <code>/raid_attack</code>.", parse_mode=ParseMode.HTML)
+
+@require_not_banned
+async def cmd_raid_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_player_for_update(update)
+    uid = update.effective_user.id
+    st = db.raid_state()
+    if not st or not st["active"]: return await update.message.reply_text("❌ No active world raid.")
+    
+    s = player_stats(uid)
+    if s["current_hp"] <= 1: return await update.message.reply_text("⚠️ HP critical! Use /heal first.")
+
+    damage = s["atk"] * 5
+    if random.random() < 0.15: damage = int(damage * 1.6)
+    result = db.raid_hit(uid, damage)
+    if not result: return await update.message.reply_text("❌ Raid ended.")
+
+    new_hp, defeated, _ = result
+    if defeated:
+        db.give(uid, yens=1000000, gems=5000, crystals=500)
+        ach = combat.CombatAchievements(uid); ach.check_raid_cleared()
+        await update.message.reply_text(f"🏆 <b>WORLD RAID DEFEATED!</b>\n\nYou dealt the killing blow!\n🎁 +1,000,000 yens, +5,000 gems, +500 crystals" + ach.reward_text(), parse_mode=ParseMode.HTML)
+    else:
+        await update.message.reply_text(f"⚔️ You hit for <b>{damage:,}</b>!\n\n❤️ Boss HP: {new_hp:,}/{st['max_hp']:,}", parse_mode=ParseMode.HTML)
+
+# =============================================================
+# NEW OP COMMANDS: /autofarm, /dailyclaim, /worldboss
+# =============================================================
+@require_not_banned
+async def cmd_autofarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """NEW OP FEATURE: Autofarm 10 NPC battles instantly for Gems."""
+    ensure_player_for_update(update)
+    uid = update.effective_user.id
+    p = db.player(uid)
+    
+    cost = 50
+    if p["gems"] < cost:
+        await update.message.reply_text(f"💎 You need {cost} Gems to trigger Autofarm.")
+        return
+        
+    s = player_stats(uid)
+    if s["current_hp"] < (s["max_hp"] * 0.5):
+        await update.message.reply_text("⚠️ You need at least 50% HP to Autofarm.")
+        return
+        
+    db.spend(uid, "gems", cost)
+    await update.message.reply_text("🤖 <b>Autofarm initiated...</b>\nFighting 10 NPCs automatically.", parse_mode=ParseMode.HTML)
+    await asyncio.sleep(1.5)
+    
+    total_yens = 0; total_exp = 0; drops = []
+    for _ in range(10):
+        npc = random.choice(G.NPCS)
+        res = run_battle(uid, npc["name"], npc["hp"], npc["dmg"])
+        if res["won"]:
+            y = int(npc["reward"] * get_world_multiplier(uid))
+            total_yens += y; total_exp += 60
+            d = apply_drops(uid, False)
+            drops.extend(d)
+            
+    db.give(uid, yens=total_yens, exp=total_exp)
+    drop_str = "\n".join(f"• {d}" for d in drops) if drops else "None"
+    await update.message.reply_text(f"✅ <b>Autofarm Complete!</b>\n\n💴 +{total_yens:,} yens\n✨ +{total_exp:,} exp\n\n<b>Drops:</b>\n{drop_str}", parse_mode=ParseMode.HTML)
+
+@require_not_banned
+async def cmd_dailyclaim(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """NEW OP FEATURE: Claim all completed daily quests at once."""
+    ensure_player_for_update(update)
+    uid = update.effective_user.id
+    db.ensure_quests_current(uid)
+    
+    claimed_any = False
+    total_yens = 0; total_gems = 0; total_crystals = 0
+    
+    for code in G.DAILY_QUESTS.keys():
+        info = db.claim_quest(uid, "daily", code)
+        if info:
+            claimed_any = True
+            total_yens += info.get("yens", 0)
+            total_gems += info.get("gems", 0)
+            total_crystals += info.get("crystals", 0)
+            
+    if claimed_any:
+        await update.message.reply_text(f"🎁 <b>All Daily Quests Claimed!</b>\n\n💴 +{total_yens:,} yens\n💎 +{total_gems} gems\n🔮 +{total_crystals} crystals", parse_mode=ParseMode.HTML)
+    else:
+        await update.message.reply_text("❌ No daily quests are complete yet.")
+
+@require_not_banned
+async def cmd_worldboss(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """NEW OP FEATURE: Fight a massive personal boss for high tier gear."""
+    ensure_player_for_update(update)
+    uid = update.effective_user.id
+    s = player_stats(uid)
+    
+    boss_name = "Legendary Super Saiyan"
+    boss_hp = s["atk"] * 8
+    boss_dmg = s["max_hp"] // 10
+    
+    await update.message.reply_text(f"🔥 <b>WORLD BOSS: {boss_name}</b>\n\nA terrifying power level approaches!", parse_mode=ParseMode.HTML)
+    await asyncio.sleep(1)
+    
+    res = run_battle(uid, boss_name, boss_hp, boss_dmg, enrage=True, is_boss=True)
+    if res["won"]:
+        db.give(uid, crystals=100, tickets=10)
+        db.add_item(uid, "Deadly Divine Sword")
+        await update.message.reply_text("🏆 <b>WORLD BOSS DEFEATED!</b>\n\n💎 +100 Crystals\n🎫 +10 Tickets\n⚔️ +Deadly Divine Sword", parse_mode=ParseMode.HTML)
+    else:
+        await update.message.reply_text("❌ You were defeated by the World Boss. Your HP is now 1.", parse_mode=ParseMode.HTML)
+
+# =============================================================
+# END OF PART 3
+# =============================================================

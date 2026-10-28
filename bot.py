@@ -805,3 +805,535 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # END OF PART 1
 # =============================================================
 # Reply "Part 2" to receive the rest of bot.py (Shop, Buy, Inventory, Gacha, etc.)
+# =============================================================
+# PART 2 — SHOP / BLACK MARKET / BUY / INVENTORY / GACHA / CHARACTERS
+# =============================================================
+
+SHOP_CATEGORY_ALIASES = {
+    "weapon": "weapon", "weapons": "weapon", "1": "weapon",
+    "armor": "armor", "armors": "armor", "armour": "armor",
+    "armours": "armor", "2": "armor",
+    "crystal": "crystal", "crystals": "crystal", "3": "crystal",
+    "heal": "heal", "healing": "heal", "potion": "heal",
+    "potions": "heal", "4": "heal",
+    "fusion": "fusion", "fusion_material": "fusion",
+    "fusion_materials": "fusion", "5": "fusion",
+    "ticket": "ticket", "tickets": "ticket", "key": "key",
+    "keys": "key", "6": "key",
+}
+
+def normalize_shop_category(token: str) -> str | None:
+    return SHOP_CATEGORY_ALIASES.get((token or "").strip().lower())
+
+def shop_items_in_category(category: str) -> list[tuple[int, tuple]]:
+    results = []
+    for sid, item in G.SHOP.items():
+        name, price, currency, kind, amount = item
+        if category == "key":
+            if kind in ("key_elite", "key_boss"): results.append((sid, item))
+        elif category == "weapon":
+            if kind == "weapon": results.append((sid, item))
+        elif category == "armor":
+            if kind == "armor": results.append((sid, item))
+        elif category == "crystal":
+            if kind == "crystal": results.append((sid, item))
+        elif category == "heal":
+            if kind == "heal": results.append((sid, item))
+        elif category == "fusion":
+            if kind == "fusion": results.append((sid, item))
+        elif category == "ticket":
+            if kind == "ticket": results.append((sid, item))
+    return results
+
+@require_not_banned
+async def cmd_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_player_for_update(update)
+    uid = update.effective_user.id
+    p = db.player(uid)
+    if not p: return
+
+    if not context.args:
+        lines = [
+            "🛒 <b>Capsule Corp Marketplace</b>\n",
+            f"💴 {p['yens']:,} yens · 💎 {p['gems']:,} gems · 🔮 {p['crystals']:,} crystals\n",
+            "Choose a department:\n",
+            "<b>1.</b> ⚔️ Weapons",
+            "<b>2.</b> 🛡️ Armors",
+            "<b>3.</b> 🔮 Crystals",
+            "<b>4.</b> 🧪 Healing Potions & Senzu Beans",
+            "<b>5.</b> 🧬 Fusion Materials",
+            "<b>6.</b> 🎫 Tickets & Summon Keys\n",
+            "🕶️ <b>blackmarket</b> — Secret OP Items (Crystals only)\n",
+            "<i>Usage:</i> <code>/shop weapons</code>",
+            "<i>Buy:</i> <code>/buy 1 10</code> (item 1, x10)",
+        ]
+        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+        return
+
+    category = normalize_shop_category(context.args[0])
+    if category is None:
+        await update.message.reply_text("❓ Unknown category.\nTry: weapons, armors, crystals, healing, fusion, tickets", parse_mode=ParseMode.HTML)
+        return
+
+    items = shop_items_in_category(category)
+    if not items:
+        await update.message.reply_text("No items in that category.")
+        return
+
+    cat_names = {
+        "weapon": "⚔️ Weapons", "armor": "🛡️ Armors", "crystal": "🔮 Crystals",
+        "heal": "🧪 Healing", "fusion": "🧬 Fusion Materials",
+        "ticket": "🎫 Gacha Tickets", "key": "🗝️ Summon Keys",
+    }
+    lines = [f"🛒 <b>{cat_names[category]}</b>\n", f"💴 {p['yens']:,} · 💎 {p['gems']:,} · 🔮 {p['crystals']:,}\n"]
+    for sid, item in items:
+        name, price, currency, kind, amount = item
+        cur_icon = {"yens": "💴", "gems": "💎", "crystals": "🔮"}.get(currency, "•")
+        qty_text = f" ×{amount}" if amount > 1 else ""
+        lines.append(f"<b>#{sid}</b> {escape(name)}{qty_text}\n   {cur_icon} {price:,} {currency}")
+    lines.append("\n💡 <b>Buy:</b> <code>/buy &lt;id&gt; [qty]</code>")
+    lines.append("<i>Bulk discounts auto-applied for qty ≥ 5.</i>")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+@require_not_banned
+async def cmd_blackmarket(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """NEW OP FEATURE: Black Market (Crystals only)."""
+    ensure_player_for_update(update)
+    uid = update.effective_user.id
+    p = db.player(uid)
+    if not p: return
+
+    black_market_items = {
+        9001: ("Ultra Instinct Potion", 500, "crystals", "heal", 1),
+        9002: ("Zenkai Core", 1500, "crystals", "fusion", 1),
+        9003: ("Omni Gacha Ticket", 2000, "crystals", "ticket", 1),
+        9004: ("Beerus Armor", 5000, "crystals", "armor", 1),
+        9005: ("Grand Priest Staff", 8000, "crystals", "weapon", 1),
+    }
+    
+    lines = [
+        "🕶️ <b>Black Market</b>\n",
+        "<i>Only the most elite warriors trade here.</i>\n",
+        f"🔮 Your Crystals: {p['crystals']:,}\n",
+    ]
+    
+    for sid, item in black_market_items.items():
+        name, price, currency, kind, amount = item
+        lines.append(f"<b>#{sid}</b> {escape(name)}\n   🔮 {price:,} crystals")
+        
+    lines.append("\n💡 <b>Buy:</b> <code>/buy &lt;id&gt;</code>")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+def _bulk_price(base_price: int, qty: int) -> int:
+    total = base_price * qty
+    if qty >= 50: total = int(total * 0.85)
+    elif qty >= 10: total = int(total * 0.90)
+    elif qty >= 5: total = int(total * 0.95)
+    return total
+
+@require_not_banned
+async def cmd_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_player_for_update(update)
+    uid = update.effective_user.id
+    p = db.player(uid)
+    if not p: return
+
+    if not context.args:
+        await update.message.reply_text("Usage: <code>/buy &lt;item_id&gt; [quantity]</code>\nExample: <code>/buy 5 10</code> — buy item #5 ×10\n\nFirst use <code>/shop</code> to see item IDs.", parse_mode=ParseMode.HTML)
+        return
+
+    item_id_str = context.args[0]
+    if not item_id_str.isdigit():
+        await update.message.reply_text("❌ Item ID must be a number.\nExample: <code>/buy 5 10</code>", parse_mode=ParseMode.HTML)
+        return
+
+    sid = int(item_id_str)
+    
+    # Check Black Market first
+    black_market_items = {
+        9001: ("Ultra Instinct Potion", 500, "crystals", "heal", 1),
+        9002: ("Zenkai Core", 1500, "crystals", "fusion", 1),
+        9003: ("Omni Gacha Ticket", 2000, "crystals", "ticket", 1),
+        9004: ("Beerus Armor", 5000, "crystals", "armor", 1),
+        9005: ("Grand Priest Staff", 8000, "crystals", "weapon", 1),
+    }
+    item = G.SHOP.get(sid) if sid not in black_market_items else black_market_items[sid]
+    
+    if item is None:
+        await update.message.reply_text(f"❌ No item with ID #{sid}.\nUse /shop to browse items.")
+        return
+
+    qty = 1
+    if len(context.args) >= 2:
+        qty_parsed = parse_amount(context.args[1])
+        if qty_parsed <= 0:
+            await update.message.reply_text("❌ Quantity must be a positive number.")
+            return
+        qty = min(qty_parsed, 100)
+
+    name, price, currency, kind, amount = item
+    total_price = _bulk_price(price, qty)
+
+    if not db.spend(uid, currency, total_price):
+        p = db.player(uid)
+        have = p[currency] if p else 0
+        await update.message.reply_text(f"❌ <b>Not enough {currency}.</b>\n\nNeed: {total_price:,} {currency}\nHave: {have:,} {currency}\n\n{'💡 Bulk discount applied!' if qty >= 5 else ''}", parse_mode=ParseMode.HTML)
+        return
+
+    delivered_text = ""
+    total_amount = amount * qty
+    if kind == "weapon": db.add_item(uid, name, qty); delivered_text = f"⚔️ {name} ×{qty} added to inventory"
+    elif kind == "armor": db.add_item(uid, name, qty); delivered_text = f"🛡️ {name} ×{qty} added to inventory"
+    elif kind == "crystal": db.give(uid, crystals=total_amount); delivered_text = f"🔮 +{total_amount} crystals"
+    elif kind == "ticket": db.give(uid, tickets=total_amount); delivered_text = f"🎫 +{total_amount} gacha tickets"
+    elif kind == "heal": db.add_item(uid, name, qty); delivered_text = f"🧪 {name} ×{qty} added to inventory"
+    elif kind == "fusion": db.add_item(uid, name, qty); delivered_text = f"🧬 {name} ×{qty} added to inventory"
+    elif kind == "key_elite": db.give(uid, keys_elite=total_amount); delivered_text = f"🔑 +{total_amount} Elite Keys"
+    elif kind == "key_boss": db.give(uid, keys_boss=total_amount); delivered_text = f"🗝️ +{total_amount} Boss Keys"
+    else: delivered_text = f"✅ {name} ×{qty}"
+
+    discount_text = ""
+    if qty >= 50: discount_text = "\n🎉 15% bulk discount applied!"
+    elif qty >= 10: discount_text = "\n🎉 10% bulk discount applied!"
+    elif qty >= 5: discount_text = "\n🎉 5% bulk discount applied!"
+
+    await update.message.reply_text(f"✅ <b>Purchase Complete</b>\n\n🛒 {escape(name)} ×{qty}\n💴 Paid: {total_price:,} {currency}\n{discount_text}\n\n{delivered_text}", parse_mode=ParseMode.HTML)
+
+@require_not_banned
+async def cmd_inventory(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_player_for_update(update)
+    uid = update.effective_user.id
+    rows = db.items(uid)
+    if not rows:
+        await update.message.reply_text("🎒 <b>Inventory Empty</b>\n\nBuy items with /shop or earn them from battles.", parse_mode=ParseMode.HTML)
+        return
+
+    groups = {"⚔️ Weapons": [], "🛡️ Armors": [], "🧪 Healing": [], "🧬 Fusion": [], "📦 Other": []}
+    for row in rows:
+        item_name = row["item"]; qty = row["qty"]
+        if item_name in G.WEAPONS: groups["⚔️ Weapons"].append((item_name, qty))
+        elif item_name in G.ARMORS: groups["🛡️ Armors"].append((item_name, qty))
+        elif item_name in G.HEALING: groups["🧪 Healing"].append((item_name, qty))
+        elif item_name in G.FUSION_MATERIALS: groups["🧬 Fusion"].append((item_name, qty))
+        else: groups["📦 Other"].append((item_name, qty))
+
+    lines = ["🎒 <b>Inventory</b>\n"]
+    for header, items in groups.items():
+        if not items: continue
+        lines.append(f"\n<b>{header}</b>")
+        for item_name, qty in items: lines.append(f"• {escape(item_name)} ×{qty}")
+    lines.append("\n💡 Use <code>/equip &lt;name&gt;</code> to equip weapons/armors.\nUse <code>/heal &lt;item&gt;</code> to consume potions.")
+
+    text = "\n".join(lines)
+    if len(text) < 4000: await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+    else:
+        await update.message.reply_text("\n".join(lines[:25]), parse_mode=ParseMode.HTML)
+        await update.message.reply_text("\n".join(lines[25:]), parse_mode=ParseMode.HTML)
+
+@require_not_banned
+async def cmd_gacha(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_player_for_update(update)
+    uid = update.effective_user.id
+    p = db.player(uid)
+    if not p: return
+
+    qty = 1; banner_key = "standard"
+    if context.args:
+        if context.args[0].isdigit():
+            qty = min(int(context.args[0]), 50)
+            if qty < 1: qty = 1
+            if len(context.args) >= 2: banner_key = context.args[1].lower()
+        else: banner_key = context.args[0].lower()
+
+    banner = G.GACHA_BANNERS.get(banner_key)
+    if banner is None:
+        await update.message.reply_text(f"❓ Unknown banner: <b>{escape(banner_key)}</b>\n\nAvailable banners:\n• <code>standard</code> — Normal rates (1 ticket)\n• <code>hero</code> — Boosted Legendary & Mythical (1 ticket)\n• <code>god</code> — Boosted Mythical & Omni (2 tickets)\n• <code>omni</code> — Boosted Omni x3 (3 tickets)", parse_mode=ParseMode.HTML)
+        return
+
+    ticket_cost = banner["cost"] * qty
+    if p["tickets"] < ticket_cost:
+        await update.message.reply_text(f"❌ <b>Not enough tickets.</b>\n\nNeed: {ticket_cost} tickets\nHave: {p['tickets']} tickets\n\n💡 Buy more with <code>/shop tickets</code>", parse_mode=ParseMode.HTML)
+        return
+
+    if not db.spend(uid, "tickets", ticket_cost):
+        await update.message.reply_text("❌ Failed to spend tickets.")
+        return
+
+    rolls = []; rarity_counts = {}
+    for _ in range(qty):
+        rarity = db.roll_rarity(banner["bonus"])
+        name = db.pick_character_of_rarity(rarity)
+        if name is None: continue
+        db.add_character(uid, name, rarity)
+        rolls.append((name, rarity))
+        rarity_counts[rarity] = rarity_counts.get(rarity, 0) + 1
+
+    quest = combat.QuestTracker(uid); quest.on_gacha(qty)
+    ach = combat.CombatAchievements(uid)
+    for name, rarity in rolls: ach.check_character(rarity)
+
+    rarity_icons = {"common": "⚪", "rare": "🔵", "epic": "🟣", "legendary": "🟡", "mythical": "🔴", "omni": "👑"}
+    lines = [f"🎰 <b>Gacha Results — {escape(banner['name'])}</b>\n", f"Rolled {qty} × cost {banner['cost']} = -{ticket_cost} tickets\n"]
+
+    if qty <= 20:
+        for i, (name, rarity) in enumerate(rolls, 1): lines.append(f"{i}. {rarity_icons.get(rarity, '•')} <b>{escape(name)}</b> ({rarity.capitalize()})")
+    else:
+        lines.append("<b>Summary:</b>")
+        for rarity in ["omni", "mythical", "legendary", "epic", "rare", "common"]:
+            count = rarity_counts.get(rarity, 0)
+            if count: lines.append(f"{rarity_icons.get(rarity, '•')} {rarity.capitalize()}: {count}")
+        high_value = [(n, r) for n, r in rolls if r in ("omni", "mythical", "legendary")]
+        if high_value:
+            lines.append("\n<b>High-value pulls:</b>")
+            for name, rarity in high_value: lines.append(f"{rarity_icons.get(rarity, '•')} {escape(name)} ({rarity.capitalize()})")
+
+    lines.append(f"\n💎 Check /mycharacters to see your full roster.")
+    lines.append(ach.reward_text())
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+@require_not_banned
+async def cmd_mycharacters(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_player_for_update(update)
+    uid = update.effective_user.id
+    p = db.player(uid)
+    if not p: return
+
+    groups = db.characters_by_rarity(uid)
+    total = sum(len(v) for v in groups.values())
+    if total == 0:
+        await update.message.reply_text("🧙 <b>Your Warriors</b>\n\nYou have no characters yet.\nRoll the gacha with /gacha to get warriors!", parse_mode=ParseMode.HTML)
+        return
+
+    lines = [f"🧙 <b>Your Warriors</b> — {total} total\n", f"Equipped: <b>{escape(p['equipped_char'] or 'none')}</b>\n"]
+    rank_order = [("omni", "👑 OMNI KINGS", "═══"), ("mythical", "🔴 MYTHICAL", "───"), ("legendary", "🟡 LEGENDARY", "───"), ("epic", "🟣 EPIC", "───"), ("rare", "🔵 RARE", "───"), ("common", "⚪ COMMON", "───")]
+
+    for rarity, header, divider in rank_order:
+        names = groups.get(rarity, [])
+        if not names: continue
+        lines.append(f"\n<b>{divider} {header} {divider}</b>")
+        lines.append(f"<i>{len(names)} warrior{'s' if len(names) != 1 else ''}</i>")
+        for name in names:
+            marker = " ⭐" if name == p["equipped_char"] else ""
+            chp, catk, cspd, ccrit = _char_stats_by_name(name)
+            lines.append(f"• <b>{escape(name)}</b>{marker}\n   ❤️{chp} ⚔️{catk} ⚡{cspd} 🎯{ccrit}%")
+
+    lines.append(f"\n💡 <code>/equip &lt;name&gt;</code> to set lead warrior")
+    text = "\n".join(lines)
+    if len(text) < 4000: await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+    else:
+        chunk = []; chunk_len = 0
+        for line in lines:
+            if chunk_len + len(line) > 3800:
+                await update.message.reply_text("\n".join(chunk), parse_mode=ParseMode.HTML)
+                chunk = []; chunk_len = 0
+            chunk.append(line); chunk_len += len(line) + 1
+        if chunk: await update.message.reply_text("\n".join(chunk), parse_mode=ParseMode.HTML)
+
+@require_not_banned
+async def cmd_equip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_player_for_update(update)
+    uid = update.effective_user.id
+    p = db.player(uid)
+    if not p: return
+
+    if not context.args:
+        await update.message.reply_text(f"⚔️ <b>Equip</b>\n\nCurrent weapon: {escape(p['weapon'] or 'none')}\nCurrent armor: {escape(p['armor'] or 'none')}\nCurrent character: {escape(p['equipped_char'] or 'none')}\n\nUsage: <code>/equip &lt;name&gt;</code>\nExample: <code>/equip Z Sword</code>\nExample: <code>/equip Ultra Instinct Goku</code>", parse_mode=ParseMode.HTML)
+        return
+
+    name = " ".join(context.args).strip()
+    if name in G.EQUIPMENT:
+        owned = {row["item"] for row in db.items(uid)}
+        if name not in owned:
+            await update.message.reply_text(f"❌ You don't own <b>{escape(name)}</b>.\nBuy it with /shop or get it from battles.", parse_mode=ParseMode.HTML)
+            return
+        slot = G.EQUIPMENT[name][0]
+        old = p[slot] if p else None
+        db.set_field(uid, slot, name)
+        slot_icon = "⚔️" if slot == "weapon" else "🛡️"
+        old_text = f"\n<i>Replaced: {escape(old)}</i>" if old else ""
+        await update.message.reply_text(f"{slot_icon} <b>Equipped {escape(name)}</b>{old_text}", parse_mode=ParseMode.HTML)
+        return
+
+    if db.has_character(uid, name):
+        old = p["equipped_char"] if p else None
+        db.set_field(uid, "equipped_char", name)
+        old_text = f"\n<i>Replaced: {escape(old)}</i>" if old else ""
+        rarity = "common"
+        for cname, crarity in db.characters(uid):
+            if cname == name: rarity = crarity; break
+        await update.message.reply_text(f"🧙 <b>Equipped {escape(name)}</b> ({rarity.capitalize()}){old_text}\n\nUse /team to see updated stats.", parse_mode=ParseMode.HTML)
+        return
+
+    await update.message.reply_text(f"❌ You don't own <b>{escape(name)}</b> (not in inventory or character roster).\n\n• Check /inventory for gear\n• Check /mycharacters for warriors", parse_mode=ParseMode.HTML)
+
+@require_not_banned
+async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_player_for_update(update)
+    uid = update.effective_user.id
+    p = db.player(uid)
+    if not p: return
+
+    learned = set(db.skills(uid))
+    sp = p["skill_points"]
+    lines = [f"🌟 <b>Ki Dojo — Skills</b>\n", f"Your SP: <b>{sp}</b>\n", f"Learned: {len(learned)} / {len(G.SKILLS)}\n"]
+
+    if learned:
+        lines.append("\n<b>✅ Learned:</b>")
+        for skill_name in sorted(learned): lines.append(f"• {skill_name} (+{G.SKILL_ATK.get(skill_name, 0)} ATK)")
+
+    available = [(name, cost) for name, cost in G.SKILLS.items() if name not in learned]
+    if available:
+        lines.append("\n<b>📖 Available to Learn:</b>")
+        for name, cost in sorted(available, key=lambda x: x[1]):
+            atk = G.SKILL_ATK.get(name, 0)
+            can_learn = "✨" if sp >= cost else "🔒"
+            lines.append(f"{can_learn} <b>{escape(name)}</b>\n   {cost} SP → +{atk} ATK")
+
+    lines.append("\n💡 <code>/learn &lt;skill name&gt;</code> to learn")
+    text = "\n".join(lines)
+    if len(text) < 4000: await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+    else:
+        await update.message.reply_text("\n".join(lines[:25]), parse_mode=ParseMode.HTML)
+        await update.message.reply_text("\n".join(lines[25:]), parse_mode=ParseMode.HTML)
+
+@require_not_banned
+async def cmd_learn(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_player_for_update(update)
+    uid = update.effective_user.id
+    p = db.player(uid)
+    if not p: return
+
+    if not context.args:
+        await update.message.reply_text("Usage: <code>/learn &lt;skill name&gt;</code>\nExample: <code>/learn Kaioken</code>\n\nUse /skills to see the full list.", parse_mode=ParseMode.HTML)
+        return
+
+    skill_name = " ".join(context.args).strip()
+    matched = None
+    for name in G.SKILLS:
+        if name.lower() == skill_name.lower(): matched = name; break
+
+    if matched is None:
+        await update.message.reply_text(f"❓ Unknown skill: <b>{escape(skill_name)}</b>\nUse /skills to see the full list.", parse_mode=ParseMode.HTML)
+        return
+
+    if matched in db.skills(uid):
+        await update.message.reply_text(f"✅ You already know <b>{escape(matched)}</b>.", parse_mode=ParseMode.HTML)
+        return
+
+    cost = G.SKILLS[matched]
+    if p["skill_points"] < cost:
+        await update.message.reply_text(f"❌ <b>Not enough SP.</b>\n\n<b>{escape(matched)}</b> costs {cost} SP.\nYou have {p['skill_points']} SP.\n\n💡 Earn SP from battles and daily rewards.", parse_mode=ParseMode.HTML)
+        return
+
+    if not db.spend(uid, "skill_points", cost):
+        await update.message.reply_text("❌ Failed to spend SP.")
+        return
+
+    db.add_skill(uid, matched)
+    atk_bonus = G.SKILL_ATK.get(matched, 0)
+    new_sp = p["skill_points"] - cost
+    await update.message.reply_text(f"🌟 <b>Skill Learned: {escape(matched)}</b>\n\n⚔️ +{atk_bonus} ATK added permanently\n🌟 SP remaining: {new_sp}\n\n<i>Your attacks now hit harder in battle!</i>", parse_mode=ParseMode.HTML)
+
+@require_not_banned
+async def cmd_wish(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_player_for_update(update)
+    uid = update.effective_user.id
+    p = db.player(uid)
+    if not p: return
+
+    have = db.dragon_balls(uid)
+    missing = [s for s in G.DRAGON_BALL_STARS if have.get(s, 0) < 1]
+    ball_line = [f"{s}★" if have.get(s, 0) >= 1 else "▫️" for s in G.DRAGON_BALL_STARS]
+    balls_text = " ".join(ball_line)
+
+    if missing:
+        missing_text = ", ".join(f"{s}★" for s in missing)
+        await update.message.reply_text(f"🐉 <b>Shenron Altar</b>\n\nYour dragon balls: {balls_text}\n\n❌ Missing: {missing_text}\n\nYou need all 7 dragon balls to summon Shenron.\n\n💡 Bosses and summons drop dragon balls at higher rates.", parse_mode=ParseMode.HTML)
+        return
+
+    if not db.take_one_of_each_dragon_ball(uid):
+        await update.message.reply_text("❌ Failed to consume dragon balls.")
+        return
+
+    roll = random.random()
+    result_text = ""
+    if roll < 0.12:
+        rarity = "mythical"; names = [n for n, r, *_ in G.CHARACTERS if r == rarity]
+        name = random.choice(names); db.add_character(uid, name, rarity)
+        result_text = f"🔴 <b>Mythical Character:</b> {escape(name)}"
+        ach = combat.CombatAchievements(uid); ach.check_character("mythical")
+    elif roll < 0.22:
+        rarity = "omni"; names = [n for n, r, *_ in G.CHARACTERS if r == rarity]
+        name = random.choice(names); db.add_character(uid, name, rarity)
+        result_text = f"👑 <b>OMNI KING:</b> {escape(name)}"
+        ach = combat.CombatAchievements(uid); ach.check_character("omni")
+    elif roll < 0.40:
+        db.add_item(uid, "Deadly Divine Sword"); result_text = "⚔️ <b>Weapon:</b> Deadly Divine Sword"
+    elif roll < 0.55:
+        skill = random.choice(list(G.SKILLS)); db.add_skill(uid, skill); result_text = f"🌟 <b>Skill:</b> {escape(skill)}"
+    elif roll < 0.80:
+        db.give(uid, yens=100000, gems=250, crystals=15, skill_points=20)
+        result_text = "💴 <b>Treasure:</b> 100,000 yens, 250 gems, 15 crystals, 20 SP"
+    else:
+        db.give(uid, gems=500, crystals=20); result_text = "💎 <b>Treasure:</b> 500 gems, 20 crystals"
+
+    ach = combat.CombatAchievements(uid); ach.check_dragon_balls()
+    await update.message.reply_text(f"🐉 <b>Shenron has awakened!</b>\n\nYour wish is granted:\n\n{result_text}\n\n<i>All 7 dragon balls consumed and scattered across the multiverse.</i>" + ach.reward_text(), parse_mode=ParseMode.HTML)
+
+# =============================================================
+# NEW OP COMMAND: /gift
+# =============================================================
+@require_not_banned
+async def cmd_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """NEW OP FEATURE: Gift items or currency to another player."""
+    ensure_player_for_update(update)
+    uid = update.effective_user.id
+    p = db.player(uid)
+    
+    if len(context.args) < 3:
+        await update.message.reply_text("Usage: <code>/gift &lt;@user&gt; &lt;currency|item|char&gt; &lt;amount|name&gt;</code>\nExample: <code>/gift @friend yens 5000</code>\nExample: <code>/gift @friend char Goku</code>", parse_mode=ParseMode.HTML)
+        return
+        
+    target_id = resolve_target_id(context.args[:1], update)
+    if not target_id:
+        await update.message.reply_text("❌ Target player not found.")
+        return
+    if target_id == uid:
+        await update.message.reply_text("❌ You cannot gift to yourself.")
+        return
+        
+    g_type = context.args[1].lower()
+    
+    # Gift Currency
+    if g_type in ["yens", "gems", "crystals", "tickets", "skill_points"]:
+        amt = parse_amount(context.args[2])
+        if amt <= 0:
+            await update.message.reply_text("❌ Invalid amount.")
+            return
+        if not db.spend(uid, g_type, amt):
+            await update.message.reply_text(f"❌ You don't have enough {g_type}.")
+            return
+        db.give(target_id, **{g_type: amt})
+        await update.message.reply_text(f"🎁 Successfully gifted {amt:,} {g_type} to {target_id}!", parse_mode=ParseMode.HTML)
+        
+    # Gift Character
+    elif g_type in ["char", "character"]:
+        char_name = " ".join(context.args[2:])
+        if not db.has_character(uid, char_name):
+            await update.message.reply_text(f"❌ You don't own <b>{escape(char_name)}</b>.", parse_mode=ParseMode.HTML)
+            return
+        if db.has_character(target_id, char_name):
+            await update.message.reply_text(f"❌ Target already owns <b>{escape(char_name)}</b>.", parse_mode=ParseMode.HTML)
+            return
+            
+        if db.transfer_character(uid, target_id, char_name):
+            await update.message.reply_text(f"🎁 Successfully gifted <b>{escape(char_name)}</b> to {target_id}!", parse_mode=ParseMode.HTML)
+        else:
+            await update.message.reply_text("❌ Failed to transfer character.")
+            
+    else:
+        await update.message.reply_text("❌ Invalid gift type. Use: yens, gems, crystals, tickets, skill_points, char.")
+
+# =============================================================
+# END OF PART 2
+# =============================================================
